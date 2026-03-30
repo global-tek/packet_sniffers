@@ -1,0 +1,25 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Install Dependencies and Run Tests",
+			"type": "shell",
+			"command": "/Users/trdr/Documents/packet_sniffers/.venv/bin/python",
+			"args": [
+				"-m",
+				"pip",
+				"install",
+				"-r",
+				"requirements.txt",
+				"&&",
+				"/Users/trdr/Documents/packet_sniffers/.venv/bin/python",
+				"tests/test_toolkit.py"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			]
+		}
+	]
+}

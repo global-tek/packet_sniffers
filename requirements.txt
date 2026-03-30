@@ -1,0 +1,44 @@
+# Core packet capture and analysis
+scapy>=2.4.5
+pyshark>=0.6
+
+# Network protocol analysis
+netaddr>=0.8.0
+dpkt>=1.9.8
+
+# Cryptography and security
+cryptography>=3.4.8
+pycryptodome>=3.15.0
+paramiko>=2.11.0
+
+# Data analysis and visualization
+pandas>=1.5.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+numpy>=1.21.0
+
+# Machine learning (optional — enables ML traffic classification)
+scikit-learn>=1.0.0
+joblib>=1.1.0
+
+# GeoIP (optional — enables local DB lookups; falls back to ip-api.com if absent)
+geoip2>=4.6.0
+
+# HTTP / web utilities
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+
+# Network scanning
+python-nmap>=0.7.1
+psutil>=5.9.0
+
+# Configuration and CLI utilities
+pyyaml>=6.0
+colorama>=0.4.4
+rich>=12.0.0
+click>=8.1.0
+
+# Development / testing
+pytest>=7.0.0
+black>=22.0.0
+flake8>=4.0.0

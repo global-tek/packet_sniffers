@@ -1,0 +1,58 @@
+# Network Packet Sniffing Toolkit Configuration
+
+# Packet Capture Settings
+capture:
+  interface: auto                    # Network interface (auto-detect or specify e.g., 'en0')
+  buffer_size: 65536                # Capture buffer size in bytes
+  timeout: 1000                     # Capture timeout in milliseconds
+  promiscuous_mode: true            # Enable promiscuous mode
+  capture_filter: ""                # BPF filter expression (empty = capture all)
+  max_packets: 0                    # Maximum packets to capture (0 = unlimited)
+
+# Analysis Settings
+analysis:
+  deep_inspection: true             # Enable deep packet inspection
+  protocol_analysis: true          # Enable protocol-specific analysis
+  suspicious_pattern_detection: true # Enable suspicious pattern detection
+  export_format: json               # Export format (json, csv, xml)
+
+# Network Scanning Settings
+scanning:
+  ping_timeout: 3                   # Ping timeout in seconds
+  port_scan_timeout: 1              # Port scan timeout per port
+  max_threads: 100                  # Maximum concurrent threads
+  common_ports_only: false          # Scan only common ports vs full range
+
+# Visualization Settings
+visualization:
+  output_dir: visualizations        # Output directory for charts
+  image_format: png                 # Image format (png, jpg, svg)
+  dpi: 300                         # Image resolution
+  style: default                   # Matplotlib style
+
+# Logging Configuration
+logging:
+  level: INFO                       # Log level (DEBUG, INFO, WARNING, ERROR)
+  log_file: packet_sniffer.log     # Log file name
+  max_file_size: 10MB              # Maximum log file size
+  backup_count: 5                  # Number of backup log files
+
+# Security Settings
+security:
+  require_admin: true               # Require administrative privileges
+  allowed_interfaces: []           # Allowed network interfaces (empty = all)
+  blocked_networks: []             # Blocked network ranges
+  encryption_analysis: true        # Enable encrypted traffic analysis
+
+# Performance Settings
+performance:
+  enable_monitoring: true          # Enable performance monitoring
+  memory_limit_mb: 1024           # Memory usage limit in MB
+  cpu_limit_percent: 80           # CPU usage limit percentage
+
+# Export Settings
+export:
+  auto_export: false              # Automatically export results
+  export_interval: 300            # Auto-export interval in seconds
+  compression: true               # Compress exported files
+  retention_days: 30              # Keep exported files for N days
