@@ -1,6 +1,6 @@
 # Network Packet Monitoring Toolkit
 
-A comprehensive Python toolkit for capturing, analysing, and visualising network traffic — with GeoIP enrichment, ML traffic classification, VoIP/RTP analysis, PII redaction, and real-time alerting.
+A comprehensive Python toolkit for capturing, analysing, and visualising network traffic — with GeoIP enrichment, ML traffic classification, VoIP/RTP analysis, PII redaction, real-time alerting, and device fingerprinting.
 
 > **Legal Notice:** For educational and authorised network monitoring only. Ensure you have explicit written permission before capturing traffic on any network you do not own.
 
@@ -21,6 +21,7 @@ A comprehensive Python toolkit for capturing, analysing, and visualising network
    - [Step 8 — PII redaction before export](#step-8--pii-redaction-before-export)
    - [Step 9 — Real-time alerts](#step-9--real-time-alerts)
    - [Step 10 — Visualise results](#step-10--visualise-results)
+   - [Step 11 — Device fingerprinting](#step-11--device-fingerprinting)
 4. [Python API Quick Reference](#python-api-quick-reference)
 5. [Configuration](#configuration)
 6. [Running Tests](#running-tests)
@@ -56,10 +57,12 @@ packet_sniffers/
 │   │   └── pii_redactor.py     ← PII scanning + redaction
 │   ├── alerts/
 │   │   └── alert_manager.py    ← Real-time rule-based alerting
+│   ├── fingerprinting/
+│   │   └── device_fingerprinter.py ← MAC analysis, DHCP/JA3/mDNS fingerprinting
 │   └── utils/
 │       └── common.py           ← Config, logging, export helpers
 ├── tests/
-│   └── test_toolkit.py         ← 82-test suite (pytest)
+│   └── test_toolkit.py         ← 100-test suite (pytest)
 └── examples/                   ← Standalone example scripts
 ```
 
@@ -125,7 +128,7 @@ pip install -r requirements.txt
 
 ```bash
 python3 -m pytest tests/test_toolkit.py -q
-# Expected: 82 passed
+# Expected: 95 passed
 ```
 
 ### 6. Check available commands
@@ -535,6 +538,73 @@ viz.create_comprehensive_dashboard(results)
 
 ---
 
+### Step 11 — Device fingerprinting
+
+Identify devices on the network, detect MAC address randomization, and
+fingerprint operating systems via DHCP, mDNS, and JA3 TLS signatures.
+
+```bash
+# Fingerprint all devices in a PCAP
+python3 main.py fingerprint capture.pcap
+
+# Save the full report as JSON
+python3 main.py fingerprint capture.pcap -j fingerprints.json
+
+# Show only devices with randomized / spoofed MACs
+python3 main.py fingerprint capture.pcap --show-randomized
+```
+
+**What it detects:**
+
+| Signal | Method | What it reveals |
+|---|---|---|
+| MAC U/L bit | Bit 1 of first octet | Locally administered (randomized/spoofed) MAC |
+| DHCP Option 55 | Parameter Request List | OS type (Windows / macOS / Android / Linux) |
+| DHCP Option 12 | Client hostname | Device name |
+| DHCP Option 60 | Vendor Class ID | OS/firmware string (e.g. "MSFT 5.0", "android-dhcp-11") |
+| mDNS PTR records | UDP 5353 | `.local` hostnames, advertised services |
+| JA3 fingerprint | TLS ClientHello MD5 | TLS client library / browser identity |
+
+**MAC randomization detection:**
+
+Modern devices (iOS 14+, Android 10+, Windows 10 20H2+) randomize their MAC
+address per-network to prevent tracking.  The toolkit checks the
+_Universally/Locally Administered_ (U/L) bit — the second least-significant bit
+of the first octet.  A value of `1` means the address is locally administered:
+
+```
+First octet hex digit 2, 6, A, or E → randomized MAC
+Example:  02:xx:xx:xx:xx:xx   ← locally administered (randomized)
+          00:xx:xx:xx:xx:xx   ← universally administered (real OUI)
+```
+
+**MAC correlation across rotations:**
+
+When two different MACs share the same DHCP hostname or mDNS name, the toolkit
+records the second MAC as an _alias_ of the first profile rather than creating
+a duplicate entry.  This lets you track a device even after it rotates its MAC.
+
+**Python API:**
+
+```python
+from src.fingerprinting.device_fingerprinter import DeviceFingerprinter
+from src.analysis.protocol_analyzer import ProtocolAnalyzer
+
+analyzer = ProtocolAnalyzer("capture.pcap")
+analyzer.load_pcap("capture.pcap")
+
+fp = DeviceFingerprinter()
+fp.process_packets(analyzer.packets)
+report = fp.generate_report()
+
+print(f"Devices found: {report['total_devices']}")
+print(f"Randomized MACs: {report['randomized_macs']}")
+for device in report['devices']:
+    print(device['mac'], device['os_guess'], device['ja3_hashes'])
+```
+
+---
+
 ## Python API Quick Reference
 
 | Import | Class | Key methods |
@@ -548,6 +618,9 @@ viz.create_comprehensive_dashboard(results)
 | `src.voip.rtp_analyzer` | `VoIPAnalyzer` | `analyze_scapy_packets()`, `calculate_stream_quality()`, `generate_report()` |
 | `src.privacy.pii_redactor` | `PIIRedactor` | `redact_string()`, `redact_dict()`, `scan_for_pii()` |
 | `src.alerts.alert_manager` | `AlertManager` | `start()`, `check()`, `fire()`, `get_alerts()`, `get_summary()` |
+| `src.fingerprinting.device_fingerprinter` | `DeviceFingerprinter` | `process_packets()`, `get_profiles()`, `generate_report()` |
+| `src.fingerprinting.device_fingerprinter` | `MACAnalyzer` | `is_locally_administered()`, `normalize_mac()`, `get_oui_prefix()` |
+| `src.fingerprinting.device_fingerprinter` | `JA3Fingerprinter` | `compute_ja3()`, `compute_ja3_from_packet()`, `compute_ja3_from_raw()` |
 | `src.visualization.network_visualizer` | `NetworkVisualizer` | `plot_protocol_distribution()`, `create_comprehensive_dashboard()` |
 
 ---
@@ -613,7 +686,7 @@ python3 -m pytest tests/test_toolkit.py -q
 python3 -m pytest tests/test_toolkit.py::TestVoIPAnalyzer -v
 ```
 
-Expected output: **82 tests, 0 failures**.
+Expected output: **100 tests, 0 failures**.
 
 ---
 

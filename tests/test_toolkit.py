@@ -671,6 +671,138 @@ class TestDataExporter(unittest.TestCase):
 
 
 # ===========================================================================
+# TestDeviceFingerprinter
+# ===========================================================================
+
+class TestDeviceFingerprinter(unittest.TestCase):
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+        from fingerprinting.device_fingerprinter import (
+            MACAnalyzer, DHCPFingerprinter, JA3Fingerprinter,
+            mDNSTracker, DeviceFingerprinter,
+        )
+        self.MAC = MACAnalyzer
+        self.DHCP = DHCPFingerprinter
+        self.JA3 = JA3Fingerprinter
+        self.mDNS = mDNSTracker
+        self.FP = DeviceFingerprinter
+
+    # --- MACAnalyzer ---
+
+    def test_normalize_mac_colons(self):
+        self.assertEqual(self.MAC.normalize_mac('AA:BB:CC:DD:EE:FF'),
+                         'aa:bb:cc:dd:ee:ff')
+
+    def test_normalize_mac_dashes(self):
+        self.assertEqual(self.MAC.normalize_mac('AA-BB-CC-DD-EE-FF'),
+                         'aa:bb:cc:dd:ee:ff')
+
+    def test_locally_administered_true(self):
+        # Second char of first octet is '2','6','A','E' → randomized
+        self.assertTrue(self.MAC.is_locally_administered('02:00:00:00:00:00'))
+        self.assertTrue(self.MAC.is_locally_administered('06:00:00:00:00:00'))
+        self.assertTrue(self.MAC.is_locally_administered('0a:00:00:00:00:00'))
+        self.assertTrue(self.MAC.is_locally_administered('0e:00:00:00:00:00'))
+
+    def test_locally_administered_false(self):
+        # Universally administered OUI
+        self.assertFalse(self.MAC.is_locally_administered('00:1A:2B:3C:4D:5E'))
+        self.assertFalse(self.MAC.is_locally_administered('ac:de:48:00:11:22'))
+
+    def test_get_oui_prefix(self):
+        self.assertEqual(self.MAC.get_oui_prefix('aa:bb:cc:dd:ee:ff'), 'AA:BB:CC')
+
+    # --- DHCPFingerprinter ---
+
+    def test_dhcp_exact_windows(self):
+        windows_prl = [1, 3, 6, 15, 31, 33, 43, 44, 46, 47, 119, 121, 249, 252]
+        result = self.DHCP.identify_os(windows_prl)
+        self.assertEqual(result, 'Windows')
+
+    def test_dhcp_exact_macos(self):
+        macos_prl = [1, 3, 6, 15, 119, 95, 252, 46]
+        result = self.DHCP.identify_os(macos_prl)
+        self.assertEqual(result, 'macOS/iOS')
+
+    def test_dhcp_exact_android(self):
+        android_prl = [1, 3, 6, 15, 26, 28, 51, 58, 59, 43]
+        result = self.DHCP.identify_os(android_prl)
+        self.assertEqual(result, 'Android')
+
+    def test_dhcp_vendor_class_override(self):
+        # Unknown PRL but vendor class identifies Windows
+        result = self.DHCP.identify_os([99, 98, 97], vendor_class='MSFT 5.0')
+        self.assertEqual(result, 'Windows')
+
+    def test_dhcp_jaccard_fallback(self):
+        # Mostly Windows options → should still match Windows via Jaccard
+        partial_windows = [1, 3, 6, 15, 31, 33, 43, 44, 46]
+        result = self.DHCP.identify_os(partial_windows)
+        self.assertIsNotNone(result)
+        self.assertIn('Windows', result)
+
+    def test_dhcp_low_confidence_returns_none(self):
+        result = self.DHCP.identify_os([99, 100, 101, 102])
+        self.assertIsNone(result)
+
+    # --- JA3Fingerprinter ---
+
+    def test_ja3_compute_returns_md5(self):
+        h = self.JA3.compute_ja3(769, [49195, 49199], [0, 23], [23, 24], [0])
+        self.assertRegex(h, r'^[0-9a-f]{32}$')
+
+    def test_ja3_grease_excluded(self):
+        # 0x0a0a is GREASE — should be stripped before hashing
+        with_grease    = self.JA3.compute_ja3(769, [0x0a0a, 49195], [0], [], [])
+        without_grease = self.JA3.compute_ja3(769, [49195],         [0], [], [])
+        self.assertEqual(with_grease, without_grease)
+
+    def test_ja3_deterministic(self):
+        h1 = self.JA3.compute_ja3(771, [49196, 49200], [0, 23], [23], [0])
+        h2 = self.JA3.compute_ja3(771, [49196, 49200], [0, 23], [23], [0])
+        self.assertEqual(h1, h2)
+
+    # --- mDNSTracker ---
+
+    def test_mdns_invalid_payload_no_crash(self):
+        tracker = self.mDNS()
+        result = tracker.process_packet('192.168.1.1', None, b'\x00\x01')
+        self.assertEqual(result['hostnames'], [])
+
+    # --- DeviceFingerprinter ---
+
+    def test_empty_report(self):
+        fp = self.FP()
+        report = fp.generate_report()
+        self.assertEqual(report['total_devices'], 0)
+        self.assertEqual(report['randomized_macs'], 0)
+        self.assertEqual(report['devices'], [])
+
+    def test_profile_created_on_process(self):
+        from fingerprinting.device_fingerprinter import _empty_profile, MACAnalyzer
+        fp = self.FP()
+        # Inject a profile directly (unit test without real packets)
+        mac = '02:aa:bb:cc:dd:ee'
+        fp._profiles[mac] = _empty_profile(mac)
+        report = fp.generate_report()
+        self.assertEqual(report['total_devices'], 1)
+        self.assertEqual(report['randomized_macs'], 1)
+
+    def test_mac_alias_correlation(self):
+        fp = self.FP()
+        mac1 = '00:11:22:33:44:55'
+        mac2 = '02:aa:bb:cc:dd:ee'
+        from fingerprinting.device_fingerprinter import _empty_profile
+        fp._profiles[mac1] = _empty_profile(mac1)
+        fp._profiles[mac1]['hostname'] = 'myphone.local'
+        fp._hostname_index['myphone.local'] = mac1
+        fp._profiles[mac2] = _empty_profile(mac2)
+        fp._correlate_hostname(mac2, 'myphone.local')
+        self.assertIn(mac2, fp._profiles[mac1]['aliases'])
+
+
+# ===========================================================================
 # Runner
 # ===========================================================================
 
@@ -696,6 +828,7 @@ def run_tests():
         TestVoIPAnalyzer,
         TestAlertManager,
         TestDataExporter,
+        TestDeviceFingerprinter,
     ]
 
     for cls in test_classes:

@@ -38,6 +38,7 @@ Examples:
   %(prog)s classify traffic.pcap                       # ML traffic classification
   %(prog)s voip traffic.pcap                           # VoIP/RTP analysis
   %(prog)s visualize analysis.json --dashboard         # Dashboard from JSON
+  %(prog)s fingerprint traffic.pcap                    # Device fingerprinting
 
 Legal Notice:
   For educational and authorised network monitoring only.
@@ -116,6 +117,13 @@ Legal Notice:
     p = sub.add_parser('alerts', help='Show alert summary for a PCAP')
     p.add_argument('pcap_file')
     p.add_argument('--output', help='Save alerts to JSONL file')
+
+    # ---- fingerprint ----
+    p = sub.add_parser('fingerprint', help='Device fingerprinting from PCAP')
+    p.add_argument('pcap_file')
+    p.add_argument('-j', '--json', help='Save JSON report to file')
+    p.add_argument('--show-randomized', action='store_true',
+                   help='Only show devices with randomized/spoofed MACs')
 
     return parser
 
@@ -463,6 +471,57 @@ def execute_alerts(args, _config):
         print(f"\n  Alerts written to: {args.output}")
 
 
+def execute_fingerprint(args, _config):
+    if not os.path.exists(args.pcap_file):
+        print(f"Error: file not found: {args.pcap_file}")
+        return
+
+    from fingerprinting.device_fingerprinter import DeviceFingerprinter
+
+    analyzer = ProtocolAnalyzer(args.pcap_file)
+    analyzer.load_pcap(args.pcap_file)
+
+    fp = DeviceFingerprinter()
+    fp.process_packets(analyzer.packets)
+    report = fp.generate_report()
+
+    devices = report['devices']
+    if args.show_randomized:
+        devices = [d for d in devices if d['is_randomized']]
+
+    print(f"\nDevice Fingerprinting: {args.pcap_file}")
+    print(f"  Total devices:    {report['total_devices']}")
+    print(f"  Randomized MACs:  {report['randomized_macs']}")
+    if report['os_distribution']:
+        print("\n  OS Distribution:")
+        for os_name, count in sorted(report['os_distribution'].items(),
+                                     key=lambda x: x[1], reverse=True):
+            print(f"    {os_name:<25} {count}")
+
+    if devices:
+        print(f"\n  Devices ({len(devices)}):")
+        for d in devices:
+            rand_flag = " [RANDOMIZED]" if d['is_randomized'] else ""
+            hostname  = d.get('hostname') or '-'
+            os_guess  = d.get('os_guess') or 'Unknown'
+            print(f"    {d['mac']}{rand_flag}")
+            print(f"      Hostname:  {hostname}")
+            print(f"      OS guess:  {os_guess}")
+            if d.get('vendor_class'):
+                print(f"      Vendor:    {d['vendor_class']}")
+            if d.get('ja3_hashes'):
+                print(f"      JA3:       {', '.join(d['ja3_hashes'][:3])}")
+            if d.get('mdns_services'):
+                print(f"      Services:  {', '.join(d['mdns_services'][:5])}")
+            if d.get('aliases'):
+                print(f"      Aliases:   {', '.join(d['aliases'])}")
+
+    if hasattr(args, 'json') and args.json:
+        with open(args.json, 'w') as fh:
+            json.dump(report, fh, indent=2)
+        print(f"\nJSON report saved: {args.json}")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -498,15 +557,16 @@ def main():
 
     try:
         dispatch = {
-            'capture':   execute_capture,
-            'analyze':   execute_analyze,
-            'scan':      execute_scan,
-            'ssl-cert':  execute_ssl_cert,
-            'geo':       execute_geo,
-            'classify':  execute_classify,
-            'voip':      execute_voip,
-            'visualize': execute_visualize,
-            'alerts':    execute_alerts,
+            'capture':     execute_capture,
+            'analyze':     execute_analyze,
+            'scan':        execute_scan,
+            'ssl-cert':    execute_ssl_cert,
+            'geo':         execute_geo,
+            'classify':    execute_classify,
+            'voip':        execute_voip,
+            'visualize':   execute_visualize,
+            'alerts':      execute_alerts,
+            'fingerprint': execute_fingerprint,
         }
         handler = dispatch.get(args.command)
         if handler:
