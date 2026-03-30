@@ -419,8 +419,8 @@ Use this before saving any analysis results that may contain personal data.
 python3 main.py analyze capture.pcap -j clean_results.json --redact-pii
 ```
 
-Redacted types: emails, US phone numbers, SSNs, credit cards, MAC addresses,
-URLs with embedded credentials, Bearer/Basic auth tokens, AWS access keys, JWTs.
+Redacted types: emails, US phone numbers, SSNs, credit cards, public IPv4 addresses,
+MAC addresses, URLs with embedded credentials, Bearer/Basic auth tokens, AWS access keys, JWTs.
 
 **Python API:**
 
@@ -569,22 +569,34 @@ analysis:
   export_format: json
 
 scanning:
-  ping_timeout: 2
-  port_scan_timeout: 1
-  max_threads: 50
-  scan_delay: 0.05         # seconds between probes (rate limit)
+  ping_timeout: 3          # ping timeout in seconds
+  port_scan_timeout: 1     # per-port TCP timeout
+  max_threads: 100         # thread pool size
+  common_ports_only: false # true = only scan well-known ports
 
 visualization:
   output_dir: visualizations
+  image_format: png
   dpi: 300
 
 logging:
   level: INFO
   log_file: packet_sniffer.log
+  max_file_size: 10MB
+  backup_count: 5
 
 security:
   require_admin: true      # set false to skip the privilege warning
+  allowed_interfaces: []   # empty = all interfaces allowed
+  encryption_analysis: true
+
+performance:
+  enable_monitoring: true
+  memory_limit_mb: 1024
+  cpu_limit_percent: 80
 ```
+
+> **Note:** `--scan-delay` and `--max-threads` are CLI flags on the `scan` command, not config file keys. They override the scanner defaults at runtime.
 
 ---
 
