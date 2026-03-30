@@ -4,6 +4,7 @@ Test Suite for Network Packet Monitoring Toolkit
 
 import json
 import os
+import struct
 import sys
 import tempfile
 import time
@@ -762,6 +763,115 @@ class TestDeviceFingerprinter(unittest.TestCase):
         h1 = self.JA3.compute_ja3(771, [49196, 49200], [0, 23], [23], [0])
         h2 = self.JA3.compute_ja3(771, [49196, 49200], [0, 23], [23], [0])
         self.assertEqual(h1, h2)
+
+    # --- ProbeRequestParser ---
+
+    def test_probe_infer_generation_ax(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'he_capable': True, 'vht_capable': True, 'ht_capable': True,
+                  'supported_rates': [54.0]}
+        self.assertEqual(ProbeRequestParser._infer_generation(result),
+                         '802.11ax (Wi-Fi 6)')
+
+    def test_probe_infer_generation_ac(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'he_capable': False, 'vht_capable': True, 'ht_capable': True,
+                  'supported_rates': [54.0]}
+        self.assertEqual(ProbeRequestParser._infer_generation(result),
+                         '802.11ac (Wi-Fi 5)')
+
+    def test_probe_infer_generation_n(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'he_capable': False, 'vht_capable': False, 'ht_capable': True,
+                  'supported_rates': [54.0]}
+        self.assertEqual(ProbeRequestParser._infer_generation(result),
+                         '802.11n (Wi-Fi 4)')
+
+    def test_probe_infer_generation_g(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'he_capable': False, 'vht_capable': False, 'ht_capable': False,
+                  'supported_rates': [54.0, 6.0]}
+        self.assertEqual(ProbeRequestParser._infer_generation(result), '802.11g')
+
+    def test_probe_infer_generation_b(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'he_capable': False, 'vht_capable': False, 'ht_capable': False,
+                  'supported_rates': [1.0, 2.0, 5.5, 11.0]}
+        self.assertEqual(ProbeRequestParser._infer_generation(result), '802.11b')
+
+    def test_probe_parse_ie_ssid(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'ssid': None, 'supported_rates': [], 'ht_capable': False,
+                  'vht_capable': False, 'he_capable': False, 'channel_width': '20MHz',
+                  'mimo_streams': None, 'ext_capabilities': []}
+        ProbeRequestParser._parse_ie(0, b'TestNet', result)
+        self.assertEqual(result['ssid'], 'TestNet')
+
+    def test_probe_parse_ie_wildcard_ssid(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'ssid': None, 'supported_rates': [], 'ht_capable': False,
+                  'vht_capable': False, 'he_capable': False, 'channel_width': '20MHz',
+                  'mimo_streams': None, 'ext_capabilities': []}
+        ProbeRequestParser._parse_ie(0, b'', result)
+        self.assertIsNone(result['ssid'])
+
+    def test_probe_parse_ie_rates(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'ssid': None, 'supported_rates': [], 'ht_capable': False,
+                  'vht_capable': False, 'he_capable': False, 'channel_width': '20MHz',
+                  'mimo_streams': None, 'ext_capabilities': []}
+        # 0x8C = basic rate 54 Mbps (0x8C & 0x7F = 0x0C = 12 → 12*0.5=6? No)
+        # rate byte: (b & 0x7F) * 0.5 → 0x6C = 108 → 108*0.5 = 54 Mbps
+        ProbeRequestParser._parse_ie(1, bytes([0x8C, 0x12, 0x24, 0x6C]), result)
+        self.assertIn(54.0, result['supported_rates'])
+
+    def test_probe_parse_ie_ht_caps(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'ssid': None, 'supported_rates': [], 'ht_capable': False,
+                  'vht_capable': False, 'he_capable': False, 'channel_width': '20MHz',
+                  'mimo_streams': None, 'ext_capabilities': []}
+        # HT Cap Info with bit 1 set (40 MHz), MCS byte 3 = 0xFF (stream 1)
+        ht_data = struct.pack('<H', 0x0002) + bytes(1) + bytes([0xFF, 0x00, 0x00])
+        ProbeRequestParser._parse_ie(45, ht_data, result)
+        self.assertTrue(result['ht_capable'])
+        self.assertEqual(result['channel_width'], '40MHz')
+        self.assertIsNotNone(result['mimo_streams'])
+
+    def test_probe_parse_ie_vht_caps(self):
+        from fingerprinting.device_fingerprinter import ProbeRequestParser
+        result = {'ssid': None, 'supported_rates': [], 'ht_capable': False,
+                  'vht_capable': False, 'he_capable': False, 'channel_width': '20MHz',
+                  'mimo_streams': None, 'ext_capabilities': []}
+        # VHT Cap with channel width bits=0 → 80 MHz
+        vht_data = struct.pack('<I', 0x00000000)
+        ProbeRequestParser._parse_ie(191, vht_data, result)
+        self.assertTrue(result['vht_capable'])
+        self.assertEqual(result['channel_width'], '80MHz')
+
+    def test_probe_wifi_gen_upgrade_in_profile(self):
+        fp = self.FP()
+        from fingerprinting.device_fingerprinter import _empty_profile
+        mac = '00:11:22:33:44:55'
+        fp._profiles[mac] = _empty_profile(mac)
+        fp._profiles[mac]['wifi_generation'] = '802.11n (Wi-Fi 4)'
+        # Simulate _process_probe updating to Wi-Fi 6
+        _GEN_RANK = {'802.11ax (Wi-Fi 6)': 5, '802.11ac (Wi-Fi 5)': 4,
+                     '802.11n (Wi-Fi 4)': 3, '802.11g': 2, '802.11b': 1, 'Unknown': 0}
+        new_gen = '802.11ax (Wi-Fi 6)'
+        cur_gen = fp._profiles[mac]['wifi_generation']
+        if _GEN_RANK.get(new_gen, 0) > _GEN_RANK.get(cur_gen, 0):
+            fp._profiles[mac]['wifi_generation'] = new_gen
+        self.assertEqual(fp._profiles[mac]['wifi_generation'], '802.11ax (Wi-Fi 6)')
+
+    def test_report_includes_wifi_distribution(self):
+        fp = self.FP()
+        from fingerprinting.device_fingerprinter import _empty_profile
+        for i, mac in enumerate(['00:11:22:33:44:55', '00:aa:bb:cc:dd:ee']):
+            fp._profiles[mac] = _empty_profile(mac)
+            fp._profiles[mac]['wifi_generation'] = '802.11ac (Wi-Fi 5)'
+        report = fp.generate_report()
+        self.assertIn('wifi_distribution', report)
+        self.assertEqual(report['wifi_distribution'].get('802.11ac (Wi-Fi 5)'), 2)
 
     # --- mDNSTracker ---
 

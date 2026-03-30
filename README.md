@@ -58,7 +58,7 @@ packet_sniffers/
 │   ├── alerts/
 │   │   └── alert_manager.py    ← Real-time rule-based alerting
 │   ├── fingerprinting/
-│   │   └── device_fingerprinter.py ← MAC analysis, DHCP/JA3/mDNS fingerprinting
+│   │   └── device_fingerprinter.py ← MAC/DHCP/JA3/mDNS/802.11 probe fingerprinting
 │   └── utils/
 │       └── common.py           ← Config, logging, export helpers
 ├── tests/
@@ -564,6 +564,7 @@ python3 main.py fingerprint capture.pcap --show-randomized
 | DHCP Option 60 | Vendor Class ID | OS/firmware string (e.g. "MSFT 5.0", "android-dhcp-11") |
 | mDNS PTR records | UDP 5353 | `.local` hostnames, advertised services |
 | JA3 fingerprint | TLS ClientHello MD5 | TLS client library / browser identity |
+| 802.11 Probe IEs | Monitor mode only | Wi-Fi generation, channel width, MIMO streams, probed SSIDs |
 
 **MAC randomization detection:**
 
@@ -577,6 +578,36 @@ First octet hex digit 2, 6, A, or E → randomized MAC
 Example:  02:xx:xx:xx:xx:xx   ← locally administered (randomized)
           00:xx:xx:xx:xx:xx   ← universally administered (real OUI)
 ```
+
+**802.11 Probe Request analysis (monitor mode only):**
+
+Standard captures (promiscuous mode on a managed interface) do not expose
+raw 802.11 frames.  To capture Probe Requests you must put the adapter into
+monitor mode first:
+
+```bash
+# macOS — capture 30 s on channel 6, convert to PCAP
+sudo /System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport en0 sniff 6
+# file is written to /tmp/airportSniffXXXXXX.cap
+
+# Linux
+sudo airmon-ng start wlan0
+sudo tcpdump -i wlan0mon -w probes.pcap type mgt subtype probe-req
+sudo airmon-ng stop wlan0mon
+```
+
+Then run the fingerprint command on the resulting PCAP:
+
+```bash
+python3 main.py fingerprint probes.pcap
+```
+
+The parser decodes the tagged-parameter Information Elements from each frame:
+- **IE 1 / IE 50** — Supported Rates → infers 802.11b/g
+- **IE 45** — HT Capabilities → 802.11n, channel width, MIMO stream count
+- **IE 191** — VHT Capabilities → 802.11ac (Wi-Fi 5), up to 160 MHz
+- **IE 255 ext=35** — HE Capabilities → 802.11ax (Wi-Fi 6)
+- **IE 127** — Extended Capabilities bitmap (BSS Transition, 802.11v/r/k, etc.)
 
 **MAC correlation across rotations:**
 

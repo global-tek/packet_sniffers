@@ -497,6 +497,11 @@ def execute_fingerprint(args, _config):
         for os_name, count in sorted(report['os_distribution'].items(),
                                      key=lambda x: x[1], reverse=True):
             print(f"    {os_name:<25} {count}")
+    if report.get('wifi_distribution'):
+        print("\n  Wi-Fi Generation Distribution:")
+        for gen, count in sorted(report['wifi_distribution'].items(),
+                                 key=lambda x: x[1], reverse=True):
+            print(f"    {gen:<25} {count}")
 
     if devices:
         print(f"\n  Devices ({len(devices)}):")
@@ -509,6 +514,14 @@ def execute_fingerprint(args, _config):
             print(f"      OS guess:  {os_guess}")
             if d.get('vendor_class'):
                 print(f"      Vendor:    {d['vendor_class']}")
+            if d.get('wifi_generation'):
+                width   = d.get('channel_width') or '?'
+                streams = d.get('mimo_streams')
+                mimo    = f"  {streams}×{streams} MIMO" if streams else ""
+                rssi    = f"  RSSI {d['signal_dbm']} dBm" if d.get('signal_dbm') else ""
+                print(f"      Wi-Fi:     {d['wifi_generation']}  {width}{mimo}{rssi}")
+            if d.get('probe_ssids'):
+                print(f"      Probed:    {', '.join(d['probe_ssids'][:5])}")
             if d.get('ja3_hashes'):
                 print(f"      JA3:       {', '.join(d['ja3_hashes'][:3])}")
             if d.get('mdns_services'):

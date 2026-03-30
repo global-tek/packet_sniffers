@@ -6,10 +6,16 @@ Identifies and tracks network devices using:
   - DHCP Option 55 / 12 / 60 OS fingerprinting
   - JA3 TLS ClientHello fingerprinting
   - mDNS hostname and service discovery
+  - 802.11 Probe Request IE capability fingerprinting
   - Cross-MAC device correlation via hostname
 
 All public methods return plain dicts (no dataclasses) consistent with the
 rest of this codebase.
+
+802.11 Probe Request note:
+  Probe frames are only visible in monitor mode captures (not standard
+  promiscuous mode).  macOS: `airport en0 sniff <channel>` then convert the
+  .cap file.  Linux: `airmon-ng start wlan0` then capture on wlan0mon.
 """
 
 import hashlib
@@ -561,6 +567,161 @@ class mDNSTracker:
 
 
 # ---------------------------------------------------------------------------
+# ProbeRequestParser
+# ---------------------------------------------------------------------------
+
+class ProbeRequestParser:
+    """
+    Parses 802.11 Probe Request frames and extracts device capability IEs.
+
+    Information Elements decoded:
+      ID  0  — SSID  (wildcard = empty bytes → None)
+      ID  1  — Supported Rates
+      ID 50  — Extended Supported Rates
+      ID 45  — HT Capabilities  (802.11n)
+      ID191  — VHT Capabilities (802.11ac)
+      ID255  — Extension element; ext_id=35 → HE Capabilities (802.11ax/Wi-Fi 6)
+      ID127  — Extended Capabilities bitmap
+
+    Requires packets captured in monitor mode (RadioTap + Dot11 headers
+    present).  Silently returns None for non-Probe-Request frames.
+    """
+
+    IE_SSID               = 0
+    IE_SUPPORTED_RATES    = 1
+    IE_EXT_SUPPORTED_RATES= 50
+    IE_HT_CAPABILITIES    = 45
+    IE_VHT_CAPABILITIES   = 191
+    IE_EXTENDED_CAPS      = 127
+    IE_EXTENSION          = 255   # umbrella for 802.11ax etc.
+    HE_CAPABILITIES_EXT   = 35    # sub-element ID inside IE_EXTENSION
+
+    @classmethod
+    def parse_scapy_probe(cls, packet) -> Optional[Dict[str, Any]]:
+        """
+        Extract capability data from a scapy 802.11 Probe Request packet.
+
+        Returns a dict or None if the packet is not a Probe Request.
+        """
+        try:
+            from scapy.layers.dot11 import Dot11, Dot11ProbeReq, Dot11Elt
+
+            if not packet.haslayer(Dot11ProbeReq):
+                return None
+
+            dot11 = packet[Dot11]
+            src_mac = dot11.addr2                        # transmitter MAC
+            seq_num = (dot11.SC >> 4) & 0xFFF           # top 12 bits of SC
+
+            signal_dbm: Optional[int] = None
+            try:
+                from scapy.layers.dot11 import RadioTap
+                if packet.haslayer(RadioTap):
+                    rt = packet[RadioTap]
+                    if hasattr(rt, 'dBm_AntSignal'):
+                        signal_dbm = int(rt.dBm_AntSignal)
+            except Exception:
+                pass
+
+            result: Dict[str, Any] = {
+                'src_mac':         src_mac,
+                'seq_num':         seq_num,
+                'signal_dbm':      signal_dbm,
+                'ssid':            None,
+                'supported_rates': [],
+                'ht_capable':      False,
+                'vht_capable':     False,
+                'he_capable':      False,
+                'channel_width':   '20MHz',
+                'mimo_streams':    None,
+                'ext_capabilities': [],
+            }
+
+            # Walk the tagged-parameter (Dot11Elt) chain
+            elt = packet[Dot11Elt] if packet.haslayer(Dot11Elt) else None
+            while elt is not None:
+                cls._parse_ie(elt.ID, bytes(elt.info or b''), result)
+                # Scapy links IEs as payload
+                from scapy.layers.dot11 import Dot11Elt as _Elt
+                elt = elt.payload if isinstance(elt.payload, _Elt) else None
+
+            result['wifi_generation'] = cls._infer_generation(result)
+            return result
+
+        except Exception as exc:
+            logger.debug("Probe Request parse error: %s", exc)
+            return None
+
+    @classmethod
+    def _parse_ie(cls, ie_id: int, data: bytes,
+                  result: Dict[str, Any]) -> None:
+        """Parse one Information Element and update result in-place."""
+
+        if ie_id == cls.IE_SSID:
+            if data:
+                result['ssid'] = data.decode('utf-8', errors='replace')
+            # empty bytes → wildcard probe, ssid stays None
+
+        elif ie_id in (cls.IE_SUPPORTED_RATES, cls.IE_EXT_SUPPORTED_RATES):
+            for b in data:
+                rate = (b & 0x7F) * 0.5   # Mbps
+                if rate and rate not in result['supported_rates']:
+                    result['supported_rates'].append(rate)
+
+        elif ie_id == cls.IE_HT_CAPABILITIES and len(data) >= 2:
+            result['ht_capable'] = True
+            ht_info = struct.unpack('<H', data[:2])[0]
+            # Bit 1: Supported Channel Width Set (0 = 20 MHz only, 1 = 20/40 MHz)
+            if ht_info & 0x0002:
+                result['channel_width'] = '40MHz'
+            # MCS Set (bytes 3–12): bytes 3–5 indicate streams 1–3
+            if len(data) >= 6:
+                streams = sum(1 for b in data[3:6] if b != 0)
+                result['mimo_streams'] = max(streams, 1)
+
+        elif ie_id == cls.IE_VHT_CAPABILITIES and len(data) >= 4:
+            result['vht_capable'] = True
+            vht_cap = struct.unpack('<I', data[:4])[0]
+            # Bits 2–3: Supported Channel Width Set
+            cw = (vht_cap >> 2) & 0x3
+            result['channel_width'] = {0: '80MHz', 1: '160MHz',
+                                        2: '80+80MHz'}.get(cw, '80MHz')
+
+        elif ie_id == cls.IE_EXTENSION and len(data) >= 1:
+            ext_id = data[0]
+            if ext_id == cls.HE_CAPABILITIES_EXT:
+                result['he_capable'] = True
+                # HE PHY Capabilities starts at byte 7 (6-byte MAC cap + 1 ext_id)
+                if len(data) > 7:
+                    he_phy = data[7]
+                    if he_phy & 0x04:
+                        result['channel_width'] = '40MHz'     # 2.4 GHz
+                    if he_phy & 0x08:
+                        result['channel_width'] = '80MHz'     # 5 GHz
+                    if he_phy & 0x10:
+                        result['channel_width'] = '160MHz'    # 5 GHz
+
+        elif ie_id == cls.IE_EXTENDED_CAPS:
+            result['ext_capabilities'] = list(data)
+
+    @staticmethod
+    def _infer_generation(result: Dict[str, Any]) -> str:
+        """Return the highest 802.11 generation the device advertises."""
+        if result['he_capable']:
+            return '802.11ax (Wi-Fi 6)'
+        if result['vht_capable']:
+            return '802.11ac (Wi-Fi 5)'
+        if result['ht_capable']:
+            return '802.11n (Wi-Fi 4)'
+        rates = result.get('supported_rates', [])
+        if any(r > 11.0 for r in rates):
+            return '802.11g'
+        if rates:
+            return '802.11b'
+        return 'Unknown'
+
+
+# ---------------------------------------------------------------------------
 # DeviceFingerprinter — orchestrator
 # ---------------------------------------------------------------------------
 
@@ -570,18 +731,25 @@ def _now_iso() -> str:
 
 def _empty_profile(mac: str) -> Dict[str, Any]:
     return {
-        'mac':           mac,
-        'is_randomized': MACAnalyzer.is_locally_administered(mac),
-        'oui_prefix':    MACAnalyzer.get_oui_prefix(mac),
-        'hostname':      None,
-        'vendor_class':  None,
-        'os_guess':      None,
-        'ja3_hashes':    [],
-        'mdns_services': [],
-        'mdns_hostnames':[],
-        'first_seen':    _now_iso(),
-        'last_seen':     _now_iso(),
-        'aliases':       [],
+        'mac':             mac,
+        'is_randomized':   MACAnalyzer.is_locally_administered(mac),
+        'oui_prefix':      MACAnalyzer.get_oui_prefix(mac),
+        'hostname':        None,
+        'vendor_class':    None,
+        'os_guess':        None,
+        'ja3_hashes':      [],
+        'mdns_services':   [],
+        'mdns_hostnames':  [],
+        # 802.11 Probe Request fields
+        'wifi_generation': None,     # highest generation seen in probe IEs
+        'probe_ssids':     [],       # SSIDs probed for (None = wildcard)
+        'probe_count':     0,        # total probe request frames seen
+        'mimo_streams':    None,     # max MIMO spatial streams advertised
+        'channel_width':   None,     # max channel width advertised
+        'signal_dbm':      None,     # most-recent RSSI from RadioTap
+        'first_seen':      _now_iso(),
+        'last_seen':       _now_iso(),
+        'aliases':         [],
     }
 
 
@@ -598,9 +766,10 @@ class DeviceFingerprinter:
     def __init__(self):
         self._profiles: Dict[str, Dict[str, Any]] = {}   # mac → profile
         self._hostname_index: Dict[str, str] = {}         # hostname → canonical mac
-        self._dhcp = DHCPFingerprinter()
-        self._ja3  = JA3Fingerprinter()
-        self._mdns = mDNSTracker()
+        self._dhcp  = DHCPFingerprinter()
+        self._ja3   = JA3Fingerprinter()
+        self._mdns  = mDNSTracker()
+        self._probe = ProbeRequestParser()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -691,6 +860,58 @@ class DeviceFingerprinter:
         except Exception as exc:
             logger.debug("TLS/JA3 processing error: %s", exc)
 
+    def _process_probe(self, packet) -> None:
+        try:
+            info = ProbeRequestParser.parse_scapy_probe(packet)
+            if not info or not info.get('src_mac'):
+                return
+
+            mac = info['src_mac']
+            profile = self._get_or_create(mac)
+            self._touch(profile)
+
+            profile['probe_count'] += 1
+
+            # Track probed SSIDs (None = wildcard, skip duplicates)
+            ssid = info.get('ssid')
+            if ssid is not None and ssid not in profile['probe_ssids']:
+                profile['probe_ssids'].append(ssid)
+
+            # Upgrade wifi generation (keep the highest seen)
+            _GEN_RANK = {
+                '802.11ax (Wi-Fi 6)': 5,
+                '802.11ac (Wi-Fi 5)': 4,
+                '802.11n (Wi-Fi 4)':  3,
+                '802.11g':            2,
+                '802.11b':            1,
+                'Unknown':            0,
+            }
+            new_gen = info.get('wifi_generation', 'Unknown')
+            cur_gen = profile.get('wifi_generation') or 'Unknown'
+            if _GEN_RANK.get(new_gen, 0) > _GEN_RANK.get(cur_gen, 0):
+                profile['wifi_generation'] = new_gen
+
+            # Channel width — prefer wider
+            _WIDTH_RANK = {'160MHz': 5, '80+80MHz': 5, '80MHz': 4,
+                           '40MHz': 3, '20MHz': 2}
+            new_w = info.get('channel_width', '20MHz')
+            cur_w = profile.get('channel_width') or '20MHz'
+            if _WIDTH_RANK.get(new_w, 0) > _WIDTH_RANK.get(cur_w, 0):
+                profile['channel_width'] = new_w
+
+            # MIMO streams — keep maximum
+            new_s = info.get('mimo_streams')
+            if new_s and (profile['mimo_streams'] is None or
+                          new_s > profile['mimo_streams']):
+                profile['mimo_streams'] = new_s
+
+            # Signal — keep most recent
+            if info.get('signal_dbm') is not None:
+                profile['signal_dbm'] = info['signal_dbm']
+
+        except Exception as exc:
+            logger.debug("Probe Request processing error: %s", exc)
+
     def _process_mdns(self, packet) -> None:
         try:
             result = self._mdns.process_scapy_packet(packet)
@@ -729,12 +950,19 @@ class DeviceFingerprinter:
 
             if packet.haslayer(UDP):
                 try:
-                    from scapy.layers.inet import UDP
                     if (packet[UDP].dport == mDNSTracker.MDNS_PORT or
                             packet[UDP].sport == mDNSTracker.MDNS_PORT):
                         self._process_mdns(packet)
                 except Exception:
                     pass
+
+            # 802.11 Probe Requests (monitor mode captures only)
+            try:
+                from scapy.layers.dot11 import Dot11ProbeReq
+                if packet.haslayer(Dot11ProbeReq):
+                    self._process_probe(packet)
+            except Exception:
+                pass
 
         except Exception as exc:
             logger.debug("process_packet error: %s", exc)
@@ -764,19 +992,23 @@ class DeviceFingerprinter:
         """
         profiles = self.get_profiles()
         os_dist: Dict[str, int] = {}
+        wifi_dist: Dict[str, int] = {}
         randomized = 0
 
         for p in profiles:
             if p['is_randomized']:
                 randomized += 1
             os_label = p.get('os_guess') or 'Unknown'
-            # Strip similarity annotation for grouping
             os_key = os_label.split(' (similarity')[0]
             os_dist[os_key] = os_dist.get(os_key, 0) + 1
+            if p.get('wifi_generation'):
+                gen = p['wifi_generation']
+                wifi_dist[gen] = wifi_dist.get(gen, 0) + 1
 
         return {
-            'total_devices':   len(profiles),
-            'randomized_macs': randomized,
-            'os_distribution': os_dist,
-            'devices':         profiles,
+            'total_devices':    len(profiles),
+            'randomized_macs':  randomized,
+            'os_distribution':  os_dist,
+            'wifi_distribution': wifi_dist,
+            'devices':          profiles,
         }
